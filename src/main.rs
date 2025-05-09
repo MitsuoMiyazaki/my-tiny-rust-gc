@@ -103,8 +103,145 @@ fn main() {
     gc.collect_garbage(&[a.clone()]);
     println!("GC後: {} 個のオブジェクトが登録されている", gc.count_objects());
 
-    a.borrow_mut().children.borrow_mut().retain(|child| child.upgrade() != Some(c.clone()));
+    a.borrow_mut().children.borrow_mut().retain(|child| {
+        if let Some(child_rc) = child.upgrade() {
+            !Rc::ptr_eq(&child_rc, &c)
+        } else {
+            true
+        }
+    });
+    
+    b.borrow_mut().children.borrow_mut().retain(|child| {
+        if let Some(child_rc) = child.upgrade() {
+            !Rc::ptr_eq(&child_rc, &c)
+        } else {
+            true
+        }
+    });
+    
 
     gc.collect_garbage(&[a.clone()]);
     println!("C削除後: {} 個のオブジェクトが登録されている", gc.count_objects());
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_gc_collects_unreachable_nodes() {
+        let gc = Gc::new();
+
+        let a = Node::new("A");
+        let b = Node::new("B");
+        let c = Node::new("C");
+
+        gc.register(&a);
+        gc.register(&b);
+        gc.register(&c);
+
+        Node::add_child(&a, &b);
+        Node::add_child(&a, &c);
+
+        assert_eq!(gc.count_objects(), 3);
+
+        gc.collect_garbage(&[a.clone()]);
+        assert_eq!(gc.count_objects(), 3);
+
+        a.borrow_mut().children.borrow_mut().retain(|child| {
+            if let Some(child_rc) = child.upgrade() {
+                !Rc::ptr_eq(&child_rc, &c)
+            } else {
+                true
+            }
+        });
+        
+        b.borrow_mut().children.borrow_mut().retain(|child| {
+            if let Some(child_rc) = child.upgrade() {
+                !Rc::ptr_eq(&child_rc, &c)
+            } else {
+                true
+            }
+        });
+        
+
+        gc.collect_garbage(&[a.clone()]);
+        assert_eq!(gc.count_objects(), 2);
+    }
+
+    #[test]
+    fn test_gc_removes_isolated_node_immediately() {
+        let gc = Gc::new();
+        let orphan = Node::new("Orphan");
+        gc.register(&orphan);
+
+        assert_eq!(gc.count_objects(), 1);
+
+        gc.collect_garbage(&[]); // ルートなし
+        assert_eq!(gc.count_objects(), 0); // 即削除される
+    }
+
+    #[test]
+    fn test_gc_with_circular_references() {
+        let gc = Gc::new();
+        let a = Node::new("A");
+        let b = Node::new("B");
+
+        gc.register(&a);
+        gc.register(&b);
+
+        // A <-> B の循環
+        Node::add_child(&a, &b);
+        Node::add_child(&b, &a);
+
+        gc.collect_garbage(&[a.clone()]);
+        assert_eq!(gc.count_objects(), 2);
+
+        // AもBもルートから切る
+        gc.collect_garbage(&[]);
+
+        assert_eq!(gc.count_objects(), 0); // 循環でも削除される（Weak参照なのでOK）
+    }
+
+    #[test]
+    fn test_gc_removes_disconnected_child() {
+    let gc = Gc::new();
+
+    let a = Node::new("A");
+    let b = Node::new("B");
+    let c = Node::new("C");
+
+    gc.register(&a);
+    gc.register(&b);
+    gc.register(&c);
+
+    Node::add_child(&a, &b);
+    Node::add_child(&a, &c);
+    Node::add_child(&b, &c); // 🔥←これ追加でOK！
+
+    assert_eq!(gc.count_objects(), 3);
+
+    gc.collect_garbage(&[a.clone()]);
+    assert_eq!(gc.count_objects(), 3);
+
+    a.borrow_mut().children.borrow_mut().retain(|child| {
+        if let Some(child_rc) = child.upgrade() {
+            !Rc::ptr_eq(&child_rc, &c)
+        } else {
+            true
+        }
+    });
+
+    b.borrow_mut().children.borrow_mut().retain(|child| {
+        if let Some(child_rc) = child.upgrade() {
+            !Rc::ptr_eq(&child_rc, &c)
+        } else {
+            true
+        }
+    });
+
+    gc.collect_garbage(&[a.clone()]);
+    assert_eq!(gc.count_objects(), 2); // ✅ c が削除されている！
+}
+
+
 }
