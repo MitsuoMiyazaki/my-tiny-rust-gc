@@ -1,10 +1,10 @@
 use std::rc::{Rc, Weak};
 use std::cell::RefCell;
+use std::collections::HashSet;
 
 struct Node {
     name: String,
     children: RefCell<Vec<Weak<RefCell<Node>>>>,
-    marked: RefCell<bool>,
 }
 
 impl Node {
@@ -12,12 +12,11 @@ impl Node {
         Rc::new(RefCell::new(Node {
             name: name.to_string(),
             children: RefCell::new(Vec::new()),
-            marked: RefCell::new(false),
         }))
     }
 
-    fn add_child(parent: &Rc<RefCell<Node>>, child: &Rc<RefCell<Node>>) {
-        parent.borrow_mut().children.borrow_mut().push(Rc::downgrade(child));
+    fn add_child(self_rc: &Rc<RefCell<Node>>, child: &Rc<RefCell<Node>>) {
+        self_rc.borrow_mut().children.borrow_mut().push(Rc::downgrade(child));
     }
 }
 
@@ -36,15 +35,15 @@ impl Gc {
         self.objects.borrow_mut().push(Rc::downgrade(obj));
     }
 
-    fn mark(&self, root: &Rc<RefCell<Node>>) {
+    fn mark(&self, root: &Rc<RefCell<Node>>, marked: &mut HashSet<*const RefCell<Node>>) {
         let mut stack = vec![Rc::clone(root)];
         while let Some(node) = stack.pop() {
-            let node_ref = node.borrow();
-            if *node_ref.marked.borrow() {
+            let ptr = Rc::as_ptr(&node);
+            if !marked.insert(ptr) {
                 continue;
             }
-            *node_ref.marked.borrow_mut() = true;
-            for weak_child in node_ref.children.borrow().iter() {
+
+            for weak_child in node.borrow().children.borrow().iter() {
                 if let Some(child) = weak_child.upgrade() {
                     stack.push(child);
                 }
@@ -52,17 +51,12 @@ impl Gc {
         }
     }
 
-    fn sweep(&self) {
+    fn sweep(&self, marked: &HashSet<*const RefCell<Node>>) {
         let mut objects = self.objects.borrow_mut();
         objects.retain(|weak_node| {
             if let Some(node) = weak_node.upgrade() {
-                let is_marked = *node.borrow().marked.borrow();
-                if is_marked {
-                    *node.borrow().marked.borrow_mut() = false;
-                    true
-                } else {
-                    false
-                }
+                let ptr = Rc::as_ptr(&node);
+                marked.contains(&ptr)
             } else {
                 false
             }
@@ -70,10 +64,11 @@ impl Gc {
     }
 
     fn collect_garbage(&self, roots: &[Rc<RefCell<Node>>]) {
+        let mut marked = HashSet::new();
         for root in roots {
-            self.mark(root);
+            self.mark(root, &mut marked);
         }
-        self.sweep();
+        self.sweep(&marked);
     }
 
     fn count_objects(&self) -> usize {
@@ -110,7 +105,7 @@ fn main() {
             true
         }
     });
-    
+
     b.borrow_mut().children.borrow_mut().retain(|child| {
         if let Some(child_rc) = child.upgrade() {
             !Rc::ptr_eq(&child_rc, &c)
@@ -118,11 +113,11 @@ fn main() {
             true
         }
     });
-    
 
     gc.collect_garbage(&[a.clone()]);
     println!("C削除後: {} 個のオブジェクトが登録されている", gc.count_objects());
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -154,7 +149,7 @@ mod tests {
                 true
             }
         });
-        
+
         b.borrow_mut().children.borrow_mut().retain(|child| {
             if let Some(child_rc) = child.upgrade() {
                 !Rc::ptr_eq(&child_rc, &c)
@@ -162,7 +157,6 @@ mod tests {
                 true
             }
         });
-        
 
         gc.collect_garbage(&[a.clone()]);
         assert_eq!(gc.count_objects(), 2);
@@ -176,8 +170,8 @@ mod tests {
 
         assert_eq!(gc.count_objects(), 1);
 
-        gc.collect_garbage(&[]); // ルートなし
-        assert_eq!(gc.count_objects(), 0); // 即削除される
+        gc.collect_garbage(&[]);
+        assert_eq!(gc.count_objects(), 0);
     }
 
     #[test]
@@ -189,59 +183,54 @@ mod tests {
         gc.register(&a);
         gc.register(&b);
 
-        // A <-> B の循環
         Node::add_child(&a, &b);
         Node::add_child(&b, &a);
 
         gc.collect_garbage(&[a.clone()]);
         assert_eq!(gc.count_objects(), 2);
 
-        // AもBもルートから切る
         gc.collect_garbage(&[]);
-
-        assert_eq!(gc.count_objects(), 0); // 循環でも削除される（Weak参照なのでOK）
+        assert_eq!(gc.count_objects(), 0);
     }
 
     #[test]
     fn test_gc_removes_disconnected_child() {
-    let gc = Gc::new();
+        let gc = Gc::new();
 
-    let a = Node::new("A");
-    let b = Node::new("B");
-    let c = Node::new("C");
+        let a = Node::new("A");
+        let b = Node::new("B");
+        let c = Node::new("C");
 
-    gc.register(&a);
-    gc.register(&b);
-    gc.register(&c);
+        gc.register(&a);
+        gc.register(&b);
+        gc.register(&c);
 
-    Node::add_child(&a, &b);
-    Node::add_child(&a, &c);
-    Node::add_child(&b, &c); // 🔥←これ追加でOK！
+        Node::add_child(&a, &b);
+        Node::add_child(&a, &c);
+        Node::add_child(&b, &c);
 
-    assert_eq!(gc.count_objects(), 3);
+        assert_eq!(gc.count_objects(), 3);
 
-    gc.collect_garbage(&[a.clone()]);
-    assert_eq!(gc.count_objects(), 3);
+        gc.collect_garbage(&[a.clone()]);
+        assert_eq!(gc.count_objects(), 3);
 
-    a.borrow_mut().children.borrow_mut().retain(|child| {
-        if let Some(child_rc) = child.upgrade() {
-            !Rc::ptr_eq(&child_rc, &c)
-        } else {
-            true
-        }
-    });
+        a.borrow_mut().children.borrow_mut().retain(|child| {
+            if let Some(child_rc) = child.upgrade() {
+                !Rc::ptr_eq(&child_rc, &c)
+            } else {
+                true
+            }
+        });
 
-    b.borrow_mut().children.borrow_mut().retain(|child| {
-        if let Some(child_rc) = child.upgrade() {
-            !Rc::ptr_eq(&child_rc, &c)
-        } else {
-            true
-        }
-    });
+        b.borrow_mut().children.borrow_mut().retain(|child| {
+            if let Some(child_rc) = child.upgrade() {
+                !Rc::ptr_eq(&child_rc, &c)
+            } else {
+                true
+            }
+        });
 
-    gc.collect_garbage(&[a.clone()]);
-    assert_eq!(gc.count_objects(), 2); // ✅ c が削除されている！
-}
-
-
+        gc.collect_garbage(&[a.clone()]);
+        assert_eq!(gc.count_objects(), 2);
+    }
 }
