@@ -1,5 +1,7 @@
-use std::rc::{Rc, Weak};
+mod test_utils;
+
 use std::cell::RefCell;
+use std::rc::{Rc, Weak};
 use std::collections::HashSet;
 
 struct Node {
@@ -118,119 +120,49 @@ fn main() {
     println!("C削除後: {} 個のオブジェクトが登録されている", gc.count_objects());
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::*;
 
     #[test]
-    fn test_gc_collects_unreachable_nodes() {
+    fn test_gc_with_shared_util() {
         let gc = Gc::new();
-
-        let a = Node::new("A");
-        let b = Node::new("B");
-        let c = Node::new("C");
-
-        gc.register(&a);
-        gc.register(&b);
-        gc.register(&c);
-
-        Node::add_child(&a, &b);
-        Node::add_child(&a, &c);
-
-        assert_eq!(gc.count_objects(), 3);
-
+        let (a, _b, _c) = build_sample_graph(&gc);
         gc.collect_garbage(&[a.clone()]);
-        assert_eq!(gc.count_objects(), 3);
-
-        a.borrow_mut().children.borrow_mut().retain(|child| {
-            if let Some(child_rc) = child.upgrade() {
-                !Rc::ptr_eq(&child_rc, &c)
-            } else {
-                true
-            }
-        });
-
-        b.borrow_mut().children.borrow_mut().retain(|child| {
-            if let Some(child_rc) = child.upgrade() {
-                !Rc::ptr_eq(&child_rc, &c)
-            } else {
-                true
-            }
-        });
-
-        gc.collect_garbage(&[a.clone()]);
-        assert_eq!(gc.count_objects(), 2);
+        assert_gc_count(&gc, 3, "基本構造");
     }
 
     #[test]
-    fn test_gc_removes_isolated_node_immediately() {
+    fn test_gc_disconnected_node_is_collected() {
         let gc = Gc::new();
-        let orphan = Node::new("Orphan");
-        gc.register(&orphan);
+        let (a, b, c) = build_sample_graph(&gc);
 
-        assert_eq!(gc.count_objects(), 1);
+        disconnect(&b, &c);
+        gc.collect_garbage(&[a.clone()]);
 
+        assert_gc_count(&gc, 2, "Cが切断された後");
+    }
+
+    #[test]
+    fn test_gc_removes_isolated_node() {
+        let gc = Gc::new();
+        let orphan = new_node(&gc, "孤立ノード");
         gc.collect_garbage(&[]);
-        assert_eq!(gc.count_objects(), 0);
+        assert_gc_count(&gc, 0, "孤立ノード削除");
     }
 
     #[test]
-    fn test_gc_with_circular_references() {
+    fn test_gc_circular_reference_is_collected() {
         let gc = Gc::new();
-        let a = Node::new("A");
-        let b = Node::new("B");
-
-        gc.register(&a);
-        gc.register(&b);
+        let a = new_node(&gc, "A");
+        let b = new_node(&gc, "B");
 
         Node::add_child(&a, &b);
         Node::add_child(&b, &a);
 
-        gc.collect_garbage(&[a.clone()]);
-        assert_eq!(gc.count_objects(), 2);
-
         gc.collect_garbage(&[]);
-        assert_eq!(gc.count_objects(), 0);
-    }
-
-    #[test]
-    fn test_gc_removes_disconnected_child() {
-        let gc = Gc::new();
-
-        let a = Node::new("A");
-        let b = Node::new("B");
-        let c = Node::new("C");
-
-        gc.register(&a);
-        gc.register(&b);
-        gc.register(&c);
-
-        Node::add_child(&a, &b);
-        Node::add_child(&a, &c);
-        Node::add_child(&b, &c);
-
-        assert_eq!(gc.count_objects(), 3);
-
-        gc.collect_garbage(&[a.clone()]);
-        assert_eq!(gc.count_objects(), 3);
-
-        a.borrow_mut().children.borrow_mut().retain(|child| {
-            if let Some(child_rc) = child.upgrade() {
-                !Rc::ptr_eq(&child_rc, &c)
-            } else {
-                true
-            }
-        });
-
-        b.borrow_mut().children.borrow_mut().retain(|child| {
-            if let Some(child_rc) = child.upgrade() {
-                !Rc::ptr_eq(&child_rc, &c)
-            } else {
-                true
-            }
-        });
-
-        gc.collect_garbage(&[a.clone()]);
-        assert_eq!(gc.count_objects(), 2);
+        assert_gc_count(&gc, 0, "循環参照でも削除");
     }
 }
